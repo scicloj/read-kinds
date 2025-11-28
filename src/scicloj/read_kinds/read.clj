@@ -48,11 +48,13 @@
 
       ;; evaluate for value, taking care to capture stderr/stdout and exceptions
       (let [form (node/sexpr node)
-            {:keys [row col]} (meta node)
+            {:keys [row col end-row end-col]} (meta node)
             out (new StringWriter)
             err (new StringWriter)
             context {:line   row
                      :column col
+                     ;; TODO for backwards compatibility with clay
+                     :region [row col end-row end-col]
                      :code   code
                      :form   form}
             result (try
