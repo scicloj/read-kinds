@@ -71,7 +71,7 @@
                (when (seq out-str) {:out out-str})
                (when (seq err-str) {:err err-str}))))))
 
-(defn- babashka? [node]
+(defn- babashka-shebang? [node]
   (-> (node/string node)
       (str/starts-with? "#!/usr/bin/env bb")))
 
@@ -80,8 +80,8 @@
   returns a vector of contexts that represent evaluation"
   (let [top-level-nodes (node/children ast)
         ;; TODO: maybe some people want to include the header?
-        babashka (some-> (first top-level-nodes) (babashka?))
-        nodes (if babashka
+        babashka-shebang (some-> (first top-level-nodes) (babashka-shebang?))
+        nodes (if babashka-shebang
                 (rest top-level-nodes)
                 top-level-nodes)]
     ;; Babashka and Clojure can evaluate files with or without the header present,
