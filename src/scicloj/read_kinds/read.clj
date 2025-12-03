@@ -48,14 +48,14 @@
   (case pr-context
     ;; Capture global *out* and *err*
     :global
-    ;; Threads may inherit only the root binding
+    ;; Futures will inherit the current binding,
+    ;; which is not affected by altering the root.
     `(with-out-err-str
-      (with-redefs [*out* *out*
-                    *err* *err*]
-        ;; Futures will inherit the current binding,
-        ;; which was not affected by altering the root.
-        (binding [*capture-pr-context* :global]
-          ~@body)))
+       ;; Threads may inherit only the root binding
+       (with-redefs [*out* *out*
+                     *err* *err*]
+         (binding [*capture-pr-context* :global]
+           ~@body)))
     ;; Capture local *out* and *err*, per note
     :local
     `(let [global-out# *out*
