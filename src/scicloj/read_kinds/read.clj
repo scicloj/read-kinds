@@ -86,25 +86,25 @@
   "Given an Abstract Syntax Tree node, returns a context.
   A context represents a top level form evaluation."
   [node options]
-  ;; capturing *out* and *err* as soon as possible
-  (with-out-err->context :local
-    (let [tag (node/tag node)
-          code (node/string node)]
-      (case tag
-        (:newline :whitespace) {:code code
-                                :kind :kind/whitespace}
+  ;; TODO could just move down to let before eval
+  (let [tag (node/tag node)
+        code (node/string node)]
+    (case tag
+      (:newline :whitespace) {:code code
+                              :kind :kind/whitespace}
 
-        :uneval {:code code
-                 :kind :kind/uneval}
+      :uneval {:code code
+               :kind :kind/uneval}
 
-        ;; extract text from comments
-        :comment {:code  code
-                  :kind  :kind/comment
-                  ;; remove leading semicolons or shebangs, and one non-newline space if present.
-                  :value (str/replace-first code #"^(;|#!)*[^\S\r\n]?" "")}
-        ;; evaluate for value, capturing exceptions
-        ;; TODO doesn't this break namespaced keywords? (sexpr-call
-        ;;      without ns/alias inf)
+      ;; extract text from comments
+      :comment {:code  code
+                :kind  :kind/comment
+                ;; remove leading semicolons or shebangs, and one non-newline space if present.
+                :value (str/replace-first code #"^(;|#!)*[^\S\r\n]?" "")}
+      ;; evaluate for value, capturing *out*, *err* and exceptions
+      ;; TODO doesn't this break namespaced keywords? (sexpr-call
+      ;;      without ns/alias inf)
+      (with-out-err->context :local
         (let [form (node/sexpr node)
               {:keys [row col end-row end-col]} (meta node)
               context {:line   row
