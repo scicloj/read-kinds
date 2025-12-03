@@ -72,7 +72,8 @@
 (defn read-file-as-notes
   "Reads a clojure source file and returns contexts."
   [^File file options]
-  (into [] notebook-xform (read/read-file file options)))
+  (into [] notebook-xform (-> (read/read-file file options)
+                              (read/eval-ast options))))
 
 (defn relative-path [^File file]
   (-> (str (.relativize (.toURI (io/file ""))
@@ -153,7 +154,8 @@
 (defn read-string-as-context
   "Reads a form and returns a context."
   [code options]
-  (maybe-advise (read/read-string code options)))
+  (maybe-advise (-> (read/read-string code options)
+                    (read/eval-ast options))))
 
 (comment
   (read-string-as-context "(+ 1 2)" {})
