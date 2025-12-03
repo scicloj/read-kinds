@@ -72,7 +72,8 @@
                   :global-err (str-and-reset! global-err#)}))))))
 
 (defn print-from-context [context]
-  (doseq [[captured print-to] (->> (map (juxt context identity)
+  (doseq [[captured print-to] (->> (map (fn [k pr-to]
+                                          [(k context) pr-to])
                                         [:out :err :global-out :global-err]
                                         (cycle [out-orig err-orig]))
                                    (filter first))]
