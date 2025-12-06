@@ -28,8 +28,8 @@
                   ex)))
 
 (def ^:dynamic *capture-pr-context*)
-(def out-orig *out*)
-(def err-orig *err*)
+(def ^:dynamic *out-orig* *out*)
+(def ^:dynamic *err-orig* *err*)
 
 (defmacro with-out-err-str [& body]
   `(binding [*out* (new StringWriter)
@@ -43,7 +43,23 @@
       s)))
 
 ;; TODO need to make items of these in notes
-(defmacro with-out-err->context [pr-context & body]
+(defmacro with-out-err-captured
+  "Captures `*out*` and `*err*`, with either `:global` or `:local`
+  `pr-context.` `:global` is used to capture output on all threads
+  during notebook execution, so should be placed at the \"top\" of a
+  notebook eval.
+
+  Inside a `:global` capture, `:local` can be used to capture the
+  output of individual note evaluations.  `:local` should be called
+  with a symbol to bind a fn which returns a map, containing `:out`,
+  `:err`, `:global-out` and `:global-err` to, for consumption in the
+  `:local` invocation's body.
+
+  with-out-err-captured :global => executes body, capturing output
+  with-out-err-captured :local fn-binding => executes body, capturing
+  output, retrieve captured output with (fn-binding)
+  "
+  [pr-context & body]
   ;; For a notebook, we capture output globally, and per note.
   (case pr-context
     ;; Capture global *out* and *err*
@@ -60,22 +76,25 @@
     :local
     `(let [global-out# *out*
            global-err# *err*]
+       (assert (symbol? '~(first body))
+               ":local capture should provide a symbol to bind
+               captured output")
        (assert (= *capture-pr-context* :global)
                ":global should be captured before (around) :local")
        (with-out-err-str
-         (let [result# (do ~@body)]
-           (into result#
-                 (filter (comp not-empty val))
-                 {:out (str *out*)
-                  :err (str *err*)
-                  :global-out (str-and-reset! global-out#)
-                  :global-err (str-and-reset! global-err#)}))))))
+         (let [~(first body) #(into {}
+                                    (filter (comp not-empty val))
+                                    {:out (str *out*)
+                                     :err (str *err*)
+                                     :global-out (str-and-reset! global-out#)
+                                     :global-err (str-and-reset! global-err#)})]
+           ~@(next body))))))
 
 (defn print-from-context [context]
   (doseq [[captured print-to] (->> (map (fn [k pr-to]
                                           [(k context) pr-to])
                                         [:out :err :global-out :global-err]
-                                        (cycle [out-orig err-orig]))
+                                        (cycle [*out-orig* *err-orig*]))
                                    (filter first))]
     (binding [*out* print-to]
       (print captured)
@@ -104,7 +123,7 @@
       ;; evaluate for value, capturing *out*, *err* and exceptions
       ;; TODO doesn't this break namespaced keywords? (sexpr-call
       ;;      without ns/alias inf)
-      (with-out-err->context :local
+      (with-out-err-captured :local captured
         (let [form (node/sexpr node)
               {:keys [row col end-row end-col]} (meta node)
               context {:line   row
@@ -121,7 +140,7 @@
                          (when *on-eval-error*
                            (*on-eval-error* context ex))
                          {:exception ex}))]
-          (merge context result))))))
+          (merge context result (captured)))))))
 
 (defn- babashka-shebang? [node]
   (-> (node/string node)
@@ -144,7 +163,7 @@
   "Evaluates an ast as retrieved via the `read-`functions."
   ([ast] (eval-ast ast {}))
   ([ast options]
-   (with-out-err->context :global
+   (with-out-err-captured :global
      (binding [;; preserve current bindings (they will be reset to
                ;; original)
                *ns* *ns*
