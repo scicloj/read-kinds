@@ -8,7 +8,7 @@
             [rewrite-clj.node :as node])
   (:import (java.io StringWriter)))
 
-(def evaluators #{:clojure :babashka})
+(def evaluators #{:clojure :babashka :jank})
 
 (defn- validate-options [{:keys [evaluator]}]
   (when evaluator
@@ -101,11 +101,37 @@
       (flush)))
   context)
 
+(defn- eval-clojure
+  [& {:keys [context] :as options}]
+  ;; evaluate for value, capturing *out*, *err* and exceptions
+  ;; TODO doesn't this break namespaced keywords? (sexpr-call
+  ;;      without ns/alias inf)
+  (with-out-err-captured :local captured
+    (try
+      ;; TODO: capture `tap` or not?
+      (let [x (eval (:form context))]
+        (assoc (captured) :value x))
+      (catch Throwable ex
+        (when *on-eval-error*
+          (*on-eval-error* context ex))
+        {:exception ex}))))
+
+(defn- eval-jank [& {:keys [context]
+                     :jank/keys [eval-fn] :as options}]
+  (let [result (eval-fn context options)]
+    ;; TODO error handling
+    (-> {:value (:value result)}
+        (into (filter (comp not-empty val))
+              (select-keys result [:out :err]))
+        ;; TODO jank nrepl supports only a single client, so we print
+        ;; to the clojure repl for convenience
+        (print-from-context))))
+
+;; TODO naming for eval-fn? there's also :jank/eval-fn
 (defn- eval-node
   "Given an Abstract Syntax Tree node, returns a context.
   A context represents a top level form evaluation."
-  [node options]
-  ;; TODO could just move down to let before eval
+  [node & {:keys [eval-fn] :as options}]
   (let [tag (node/tag node)
         code (node/string node)]
     (case tag
@@ -120,27 +146,16 @@
                 :kind  :kind/comment
                 ;; remove leading semicolons or shebangs, and one non-newline space if present.
                 :value (str/replace-first code #"^(;|#!)*[^\S\r\n]?" "")}
-      ;; evaluate for value, capturing *out*, *err* and exceptions
-      ;; TODO doesn't this break namespaced keywords? (sexpr-call
-      ;;      without ns/alias inf)
-      (with-out-err-captured :local captured
-        (let [form (node/sexpr node)
-              {:keys [row col end-row end-col]} (meta node)
-              context {:line   row
-                       :column col
-                       ;; TODO for backwards compatibility with clay
-                       :region [row col end-row end-col]
-                       :code   code
-                       :form   form}
-              result (try
-                       ;; TODO: capture `tap` or not?
-                       (let [x (eval form)]
-                         {:value x})
-                       (catch Throwable ex
-                         (when *on-eval-error*
-                           (*on-eval-error* context ex))
-                         {:exception ex}))]
-          (merge context result (captured)))))))
+      (let [form (node/sexpr node)
+            {:keys [row col end-row end-col]} (meta node)
+            context {:line   row
+                     :column col
+                     ;; TODO for backwards compatibility with clay
+                     :region [row col end-row end-col]
+                     :code   code
+                     :form   form}
+            result (eval-fn :context context options)]
+        (merge context result)))))
 
 (defn- babashka-shebang? [node]
   (-> (node/string node)
@@ -157,19 +172,27 @@
                 (rest top-level-nodes)
                 top-level-nodes)]
     ;; must be eager to restore current bindings
-    (mapv #(-> % (eval-node options) print-from-context) nodes)))
+    (mapv #(-> %
+               (eval-node :eval-fn eval-clojure options)
+               (print-from-context)) nodes)))
+
+(defn eval-jank-ast
+  [ast & {:as options}]
+  (mapv #(eval-node % :eval-fn eval-jank options) (node/children ast)))
 
 (defn eval-ast
   "Evaluates an ast as retrieved via the `read-`functions."
   ([ast] (eval-ast ast {}))
   ([ast options]
-   (with-out-err-captured :global
-     (binding [;; preserve current bindings (they will be reset to
-               ;; original)
-               *ns* *ns*
-               *warn-on-reflection* *warn-on-reflection*
-               *unchecked-math* *unchecked-math*]
-       (eval-ast* ast options)))))
+   (if (= :jank (:evaluator options))
+     (eval-jank-ast ast options)
+     (with-out-err-captured :global
+       (binding [;; preserve current bindings (they will be reset to
+                 ;; original)
+                 *ns* *ns*
+                 *warn-on-reflection* *warn-on-reflection*
+                 *unchecked-math* *unchecked-math*]
+         (eval-ast* ast options))))))
 
 (defn read-string
   "Parse the first form in a string. The result can be passed to `eval-ast`.
