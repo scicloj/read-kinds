@@ -1,7 +1,7 @@
 {:paths ["src"]
  :deps  {org.clojure/clojure             {:mvn/version "1.12.4"}
          io.github.scicloj/kindly        {:git/sha "2863a8e08c39b1ec50a2ffde2d0874942a113d4b"}
-         io.github.scicloj/kindly-advice {:git/sha "6760f8c4da48aa0b49fb2c45fae88e4834741413"}
+         io.github.scicloj/kindly-advice {:git/sha "17f506f169ac09b2c2d90625f1a31246e0b87360"}
          rewrite-clj/rewrite-clj         {:mvn/version "1.2.50"}}
  :aliases
  {
