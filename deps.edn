@@ -1,8 +1,8 @@
 {:paths ["src"]
- :deps  {org.clojure/clojure       {:mvn/version "1.12.4"}
-         org.scicloj/kindly        {:git/sha "2863a8e08c39b1ec50a2ffde2d0874942a113d4b"}
-         org.scicloj/kindly-advice {:git/sha "6760f8c4da48aa0b49fb2c45fae88e4834741413"}
-         rewrite-clj/rewrite-clj   {:mvn/version "1.2.50"}}
+ :deps  {org.clojure/clojure             {:mvn/version "1.12.4"}
+         io.github.scicloj/kindly        {:git/sha "2863a8e08c39b1ec50a2ffde2d0874942a113d4b"}
+         io.github.scicloj/kindly-advice {:git/sha "6760f8c4da48aa0b49fb2c45fae88e4834741413"}
+         rewrite-clj/rewrite-clj         {:mvn/version "1.2.50"}}
  :aliases
  {
   ;; Build with `clojure -T:dev build/jar` and `clojure -T:dev build/deploy`
