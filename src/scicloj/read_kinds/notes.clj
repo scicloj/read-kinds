@@ -7,9 +7,10 @@
             [clojure.java.shell :as sh]
             [clojure.pprint :as pprint]
             [clojure.string :as str]
-            [scicloj.kindly-advice.v1.api :as ka]
-            [scicloj.kindly-advice.v1.completion :as completion]
-            [scicloj.read-kinds.read :as read])
+            [scicloj.kindly-advice.v2.api :as ka]
+            [scicloj.kindly-advice.v2.completion :as completion]
+            [scicloj.read-kinds.read :as read]
+            [scicloj.kindly.v5.api :as kindly])
   (:import (clojure.lang IDeref)
            (java.io File)))
 
@@ -22,6 +23,11 @@
 
 (defn comment? [context]
   (= (:kind context) :kind/comment))
+
+(defn options? [context]
+  ;; TODO For now :kindly/merge-options, :kindly/options is already
+  ;; used as a key in contexts to hold the actual options
+  (contains? (some-> context :value meta) :kindly/merge-options))
 
 (defn derefing-advise
   "Kind priority is inside out: kinds on the value supersedes kinds on the ref."
@@ -55,19 +61,45 @@
     (top-level-advise context)
     context))
 
+(defn merge-options
+  "Merges data with meta `:kindly/merge-options` into context's `:kindly/options`,
+  propagating them to all following contexts."
+  ([]
+   (fn [rf]
+     (let [options (volatile! nil)]
+       (fn
+         ([] (rf))
+         ([result] (rf result))
+         ([result input]
+          (when (options? input)
+            (vswap! options kindly/deep-merge
+                    ;; TODO or remove all meta?
+                    (vary-meta (:value input) dissoc :kindly/merge-options)))
+          (let [opts @options]
+            (if (and (some? opts)
+                     (not (comment? input))
+                     (not (= :kind/md (:kind input))))
+              (rf result (update input :kindly/options #(kindly/deep-merge opts %)))
+              (rf result input))))))))
+  ([coll] (sequence (merge-options) coll)))
+
 (def notebook-xform
   "Transducer to infer kinds, join comment blocks, and remove unnecessary whitespace."
   (comp
-    ;; infer kinds
-    (map maybe-advise)
-    ;; join comment blocks -- whitespace and uneval still break them
-    (partition-by comment?)
-    (mapcat (fn [part]
-              (if (comment? (first part))
-                [(join-comment-blocks part)]
-                part)))
-    ;; remove uneval and whitespace
-    (remove (comp #{:kind/hidden :kind/uneval :kind/whitespace} :kind))))
+   ;; infer kinds
+   (map maybe-advise)
+
+   ;; join comment blocks -- whitespace and uneval still break them
+   (partition-by comment?)
+   (mapcat (fn [part]
+             (if (comment? (first part))
+               [(join-comment-blocks part)]
+               part)))
+
+   ;; remove uneval and whitespace
+   (remove (comp #{:kind/hidden :kind/uneval :kind/whitespace} :kind))
+
+   (merge-options)))
 
 (defn read-file-as-notes
   "Reads a clojure source file and returns contexts."
