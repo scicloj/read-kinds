@@ -24,11 +24,6 @@
 (defn comment? [context]
   (= (:kind context) :kind/comment))
 
-(defn options? [context]
-  ;; TODO For now :kindly/merge-options, :kindly/options is already
-  ;; used as a key in contexts to hold the actual options
-  (contains? (some-> context :value meta) :kindly/merge-options))
-
 (defn derefing-advise
   "Kind priority is inside out: kinds on the value supersedes kinds on the ref."
   [context]
@@ -51,7 +46,7 @@
                           (completion/meta-kind value))]
         (if meta-kind
           (ka/advise (derefing-advise (assoc context :value v
-                                                  :meta-kind meta-kind)))
+                                             :meta-kind meta-kind)))
           (ka/advise context)))
       (derefing-advise context))))
 
@@ -60,6 +55,16 @@
            (not (contains? context :kind)))
     (top-level-advise context)
     context))
+
+(defn extract-options [{:keys [value form] :as context}]
+  ;; TODO For now :kindly/merge-options, :kindly/options is already
+  ;; used as a key in contexts to hold the actual options
+  (or (when (contains? (meta value) :kindly/merge-options)
+        value)
+      (when-let [opts (and (sequential? form)
+                           (-> form first (= 'ns))
+                           (completion/meta-options form))]
+        opts)))
 
 (defn merge-options
   "Merges data with meta `:kindly/merge-options` into context's `:kindly/options`,
@@ -71,10 +76,8 @@
          ([] (rf))
          ([result] (rf result))
          ([result input]
-          (when (options? input)
-            (vswap! options kindly/deep-merge
-                    ;; TODO or remove all meta?
-                    (vary-meta (:value input) dissoc :kindly/merge-options)))
+          (when-let [opts (extract-options input)]
+            (vswap! options kindly/deep-merge opts))
           (let [opts @options]
             (if (and (some? opts)
                      (not (comment? input))
