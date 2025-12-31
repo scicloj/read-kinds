@@ -2,7 +2,8 @@
  :deps  {org.clojure/clojure             {:mvn/version "1.12.4"}
          io.github.scicloj/kindly        {:git/sha "2863a8e08c39b1ec50a2ffde2d0874942a113d4b"}
          io.github.scicloj/kindly-advice {:git/sha "17f506f169ac09b2c2d90625f1a31246e0b87360"}
-         rewrite-clj/rewrite-clj         {:mvn/version "1.2.50"}}
+         rewrite-clj/rewrite-clj         {:mvn/version "1.2.50"}
+         borkdude/edamame                {:mvn/version "1.5.37"}}
  :aliases
  {
   ;; Build with `clojure -T:dev build/jar` and `clojure -T:dev build/deploy`

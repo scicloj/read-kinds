@@ -4,6 +4,9 @@
   which will be further annotated with more information."
   (:refer-clojure :exclude [read-string])
   (:require [clojure.string :as str]
+            [edamame.core :as e]
+            [clojure.java.io :as io]
+
             [rewrite-clj.parser :as parser]
             [rewrite-clj.node :as node])
   (:import (java.io StringWriter)))
@@ -145,34 +148,119 @@
     ;; must be eager to restore current bindings
     (mapv #(top-level-node->note % options) nodes)))
 
-(defn read-string
-  "Parse the first form in a string. The result can be passed to `eval-ast`.
-  Suitable for sending text representing one thing for visualization."
-  ([code] (read-string code {}))
-  ([code options]
-   (validate-options options)
-   (ast->notes [(parser/parse-string code)] options)))
+(def eof
+  (Object.))
+
+(defn- parse-all
+  "Reads all forms from a string or reader."
+  [code]
+  (let [opts (e/normalize-opts {:eof         eof
+                                ;; Starting to test with this
+                                :all         true
+                                :row-key     :line
+                                :col-key     :column
+                                :end-row-key :end-line
+                                :end-col-key :end-column
+                                :uneval (fn [{:keys [next uneval]}]
+                                          (vary-meta next update :uneval
+                                                     conj
+                                                     [uneval (meta uneval)]))})
+        r    (e/source-reader code)]
+    (loop [ret (transient [])]
+      (let [[form source :as v] (e/parse-next+string r opts)]
+        (if (identical? eof form)
+          (persistent! (conj! ret [:eof source (meta form)]))
+          (recur (conj! ret (conj v (meta form)))))))))
+
+(comment
+  ;; Trailing comment can be grabbed from EOF read
+  (parse-all ";; Hello
+[]
+;; buh
+;;hello
+#_(println x)
+;; world
+;; as")
+
+  ;; => [[[] ";; Hello\n[]" {:line 2, :column 1, :end-line 2, :end-column 3}]
+  ;;     [:eof ";; buh\n;;hello\n#_(println x)\n;; world\n;; as" nil]]
+
+  ;; Uneval on eof doesn't work, also not with (reify Object) as eof
+  (parse-all "
+;;hello
+#_(println x)")
+
+  ;; => [[:eof ";;hello\n#_(println x)" nil]]
+
+
+  ;; If we append a sentinel value while reading, we can always get
+  ;; uneval at the end too
+  (parse-all ";; Hello
+[1 2 3]
+;; buh
+(+ 1 2)
+;;hello
+#_(println x)
+;; world
+#_[bad]
+;; as
+['sentinel]")
+
+  ;; => [[[1 2 3]
+  ;;      ";; Hello\n[1 2 3]"
+  ;;      {:line 2, :column 1, :end-line 2, :end-column 8}]
+  ;;     [(+ 1 2)
+  ;;      ";; buh\n(+ 1 2)"
+  ;;      {:line 4, :column 1, :end-line 4, :end-column 8}]
+  ;;     [['sentinel]
+  ;;      ";;hello\n#_(println x)\n;; world\n#_[bad]\n;; as\n['sentinel]"
+  ;;      {:line 6,
+  ;;       :column 1,
+  ;;       :end-line 10,
+  ;;       :end-column 12,
+  ;;       :uneval
+  ;;       ([(println x) {:line 6, :column 3, :end-line 6, :end-column 14}]
+  ;;        [[bad] {:line 8, :column 3, :end-line 8, :end-column 8}])}]
+  ;;    [:eof "" nil]]
+
+  ;; TODO need to add :postprocess and wrapping to preserve meta (loc,
+  ;; hopefully uneval) on non-IObj
+  ;; https://github.com/borkdude/edamame/tree/master?tab=readme-ov-file#postprocess
+  (parse-all "
+;;hello
+#_(+ 1 2)
+:a
+#_(println x)
+['sentinel]"))
 
 (defn read-string-all
-  "Parse all forms in a string. The result can be passed to `eval-ast`.
+  "Parse all forms in a string. The result is passed to `ast->notes`.
   Suitable for sending a selection of text for visualization.
   When reading a file, prefer using `read-file` to preserve the
   current ns bindings."
   ([code] (read-string-all code {}))
   ([code options]
    (validate-options options)
-   ;; preserve current bindings (they will be reset to original)
-   (ast->notes (parser/parse-string-all code) options)))
+   (ast->notes (parse-all code) options)))
+
+(defn read-string
+  "Parse the first form in a string. The result is passed to `ast->notes`.
+  Suitable for sending text representing one thing for visualization."
+  ([code] (read-string code {}))
+  ([code options]
+   (validate-options options)
+   ;; TODO but this isn't correct, because we also always want a namsepace?
+   (first (read-string-all code options))))
 
 ;; TODO Add filename to options before passing them on
 (defn read-file
   "Similar to `clojure.core/load-file`, but returns a representation
-  of the forms, which can be passed to `eval-ast`.
+  of the forms, which is passed to `ast->notes`.
   Suitable for processing an entire namespace."
   [file options]
   (validate-options options)
-  ;; preserve current bindings (they will be reset to original)
-  (ast->notes (parser/parse-file-all file) options))
+  (with-open [r (io/reader file)]
+    (read-string-all r options)))
 
 (defn- eval-note [note options]
   (if (contains? note :kind)
