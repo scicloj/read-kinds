@@ -175,34 +175,39 @@
   (ast->notes (parser/parse-file-all file) options))
 
 (defn- eval-note [note options]
-  ;; evaluate for value, capturing *out*, *err* and exceptions
-  ;; TODO doesn't this break namespaced keywords? (sexpr-call
-  ;;      without ns/alias inf)
-  (with-out-err-captured :local captured
-    ;; TODO In the future we might not need clojure read-string
-    ;; Or we have to merge position metadata into form metadata
-    (let [form (if (:code note)
-                 (clojure.core/read-string (:code note))
-                 (:form note))
-          note (assoc note :form form)
-          ;; TODO Probably we need to bind the current file and
-          ;; position
-          result (try
-                   ;; TODO: capture `tap` or not?
-                   (let [x (eval form)]
-                     {:value x})
-                   (catch Throwable ex
-                     (when *on-eval-error*
-                       (*on-eval-error* note ex))
-                     {:exception ex}))]
-      (merge note result (captured)))))
+  (if (contains? note :kind)
+    note
+    ;; evaluate for value, capturing *out*, *err* and exceptions
+    ;; TODO doesn't this break namespaced keywords? (sexpr-call
+    ;;      without ns/alias inf)
+    (with-out-err-captured :local captured
+      ;; TODO In the future we might not need clojure read-string
+      ;; Or we have to merge position metadata into form metadata
+      (let [form (if (:code note)
+                   (clojure.core/read-string (:code note))
+                   (:form note))
+            note (assoc note :form form)
+            ;; TODO Probably we need to bind the current file and
+            ;; position
+            result (try
+                     ;; TODO: capture `tap` or not?
+                     (let [x (eval form)]
+                       {:value x})
+                     (catch Throwable ex
+                       (when *on-eval-error*
+                         (*on-eval-error* note ex))
+                       {:exception ex}))]
+        (merge note result (captured))))))
 
 ;; TODO still have to print-from-context
-(defn eval-notes [notes options]
-  (binding [;; preserve current bindings (they will be reset to
-            ;; original)
-            *ns* *ns*
-            *warn-on-reflection* *warn-on-reflection*
-            *unchecked-math* *unchecked-math*]
-    (with-out-err-captured :global
-      (mapv #(-> (eval-note % options) print-from-context) notes))))
+(defn eval-notes
+  ([notes]
+   (eval-notes notes {}))
+  ([notes options]
+   (binding [;; preserve current bindings (they will be reset to
+             ;; original)
+             *ns* *ns*
+             *warn-on-reflection* *warn-on-reflection*
+             *unchecked-math* *unchecked-math*]
+     (with-out-err-captured :global
+       (mapv #(-> (eval-note % options) print-from-context) notes)))))
