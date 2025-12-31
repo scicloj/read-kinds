@@ -7,9 +7,10 @@
             [clojure.java.shell :as sh]
             [clojure.pprint :as pprint]
             [clojure.string :as str]
-            [scicloj.kindly-advice.v1.api :as ka]
-            [scicloj.kindly-advice.v1.completion :as completion]
-            [scicloj.read-kinds.read :as read])
+            [scicloj.kindly-advice.v2.api :as ka]
+            [scicloj.kindly-advice.v2.completion :as completion]
+            [scicloj.read-kinds.read :as read]
+            [scicloj.kindly.v5.api :as kindly])
   (:import (clojure.lang IDeref)
            (java.io File)))
 
@@ -45,7 +46,7 @@
                           (completion/meta-kind value))]
         (if meta-kind
           (ka/advise (derefing-advise (assoc context :value v
-                                                  :meta-kind meta-kind)))
+                                             :meta-kind meta-kind)))
           (ka/advise context)))
       (derefing-advise context))))
 
@@ -55,24 +56,59 @@
     (top-level-advise context)
     context))
 
+(defn extract-options [{:keys [value form] :as context}]
+  ;; TODO For now :kindly/merge-options, :kindly/options is already
+  ;; used as a key in contexts to hold the actual options
+  (or (when (contains? (meta value) :kindly/merge-options)
+        value)
+      (when-let [opts (and (sequential? form)
+                           (-> form first (= 'ns))
+                           (completion/meta-options form))]
+        opts)))
+
+(defn merge-options
+  "Merges data with meta `:kindly/merge-options` into context's `:kindly/options`,
+  propagating them to all following contexts."
+  ([]
+   (fn [rf]
+     (let [options (volatile! nil)]
+       (fn
+         ([] (rf))
+         ([result] (rf result))
+         ([result input]
+          (when-let [opts (extract-options input)]
+            (vswap! options kindly/deep-merge opts))
+          (let [opts @options]
+            (if (and (some? opts)
+                     (not (comment? input))
+                     (not (= :kind/md (:kind input))))
+              (rf result (update input :kindly/options #(kindly/deep-merge opts %)))
+              (rf result input))))))))
+  ([coll] (sequence (merge-options) coll)))
+
 (def notebook-xform
   "Transducer to infer kinds, join comment blocks, and remove unnecessary whitespace."
   (comp
-    ;; infer kinds
-    (map maybe-advise)
-    ;; join comment blocks -- whitespace and uneval still break them
-    (partition-by comment?)
-    (mapcat (fn [part]
-              (if (comment? (first part))
-                [(join-comment-blocks part)]
-                part)))
-    ;; remove uneval and whitespace
-    (remove (comp #{:kind/hidden :kind/uneval :kind/whitespace} :kind))))
+   ;; infer kinds
+   (map maybe-advise)
+
+   ;; join comment blocks -- whitespace and uneval still break them
+   (partition-by comment?)
+   (mapcat (fn [part]
+             (if (comment? (first part))
+               [(join-comment-blocks part)]
+               part)))
+
+   ;; remove uneval and whitespace
+   (remove (comp #{:kind/hidden :kind/uneval :kind/whitespace} :kind))
+
+   (merge-options)))
 
 (defn read-file-as-notes
   "Reads a clojure source file and returns contexts."
   [^File file options]
-  (into [] notebook-xform (read/read-file file options)))
+  (into [] notebook-xform (-> (read/read-file file options)
+                              (read/eval-notes options))))
 
 (defn relative-path [^File file]
   (-> (str (.relativize (.toURI (io/file ""))
@@ -153,7 +189,8 @@
 (defn read-string-as-context
   "Reads a form and returns a context."
   [code options]
-  (maybe-advise (read/read-string code options)))
+  (maybe-advise (-> (read/read-string code options)
+                    (read/eval-notes options))))
 
 (comment
   (read-string-as-context "(+ 1 2)" {})

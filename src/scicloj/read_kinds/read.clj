@@ -4,6 +4,9 @@
   which will be further annotated with more information."
   (:refer-clojure :exclude [read-string])
   (:require [clojure.string :as str]
+            [edamame.core :as e]
+            [clojure.java.io :as io]
+
             [rewrite-clj.parser :as parser]
             [rewrite-clj.node :as node])
   (:import (java.io StringWriter)))
@@ -27,11 +30,86 @@
                    :context context}
                   ex)))
 
-(defn- eval-node
-  "Given an Abstract Syntax Tree node, returns a context.
-  A context represents a top level form evaluation."
+(def ^:dynamic *capture-pr-context*)
+(def ^:dynamic *out-orig* *out*)
+(def ^:dynamic *err-orig* *err*)
+
+(defmacro with-out-err-str [& body]
+  `(binding [*out* (new StringWriter)
+             *err* (new StringWriter)]
+     ~@body))
+
+(defn str-and-reset! [w]
+  (locking w
+    (let [s (str w)]
+      (.setLength (.getBuffer ^StringWriter w) 0)
+      s)))
+
+;; TODO need to make items of these in notes
+(defmacro with-out-err-captured
+  "Captures `*out*` and `*err*`, with either `:global` or `:local`
+  `pr-context.` `:global` is used to capture output on all threads
+  during notebook execution, so should be placed at the \"top\" of a
+  notebook eval.
+
+  Inside a `:global` capture, `:local` can be used to capture the
+  output of individual note evaluations.  `:local` should be called
+  with a symbol to bind a fn which returns a map, containing `:out`,
+  `:err`, `:global-out` and `:global-err` to, for consumption in the
+  `:local` invocation's body.
+
+  with-out-err-captured :global => executes body, capturing output
+  with-out-err-captured :local fn-binding => executes body, capturing
+  output, retrieve captured output with (fn-binding)
+  "
+  [pr-context & body]
+  ;; For a notebook, we capture output globally, and per note.
+  (case pr-context
+    ;; Capture global *out* and *err*
+    :global
+    ;; Futures will inherit the current binding,
+    ;; which is not affected by altering the root.
+    `(with-out-err-str
+       ;; Threads may inherit only the root binding
+       (with-redefs [*out* *out*
+                     *err* *err*]
+         (binding [*capture-pr-context* :global]
+           ~@body)))
+    ;; Capture local *out* and *err*, per note
+    :local
+    `(let [global-out# *out*
+           global-err# *err*]
+       (assert (symbol? '~(first body))
+               ":local capture should provide a symbol to bind
+               captured output")
+       (assert (= *capture-pr-context* :global)
+               ":global should be captured before (around) :local")
+       (with-out-err-str
+         (let [~(first body) #(into {}
+                                    (filter (comp not-empty val))
+                                    {:out (str *out*)
+                                     :err (str *err*)
+                                     :global-out (str-and-reset! global-out#)
+                                     :global-err (str-and-reset! global-err#)})]
+           ~@(next body))))))
+
+(defn print-from-context [context]
+  (doseq [[captured print-to] (->> (map (fn [k pr-to]
+                                          [(k context) pr-to])
+                                        [:out :err :global-out :global-err]
+                                        (cycle [*out-orig* *err-orig*]))
+                                   (filter first))]
+    (binding [*out* print-to]
+      (print captured)
+      (flush)))
+  context)
+
+(defn- top-level-node->note
+  "Given an Abstract Syntax Tree node, returns a note.
+  A note represents a top level form evaluation."
   [node options]
-  (let [tag (node/tag node)
+  ;; TODO could just move down to let before eval
+  (let [tag  (node/tag node)
         code (node/string node)]
     (case tag
       (:newline :whitespace) {:code code
@@ -45,91 +123,179 @@
                 :kind  :kind/comment
                 ;; remove leading semicolons or shebangs, and one non-newline space if present.
                 :value (str/replace-first code #"^(;|#!)*[^\S\r\n]?" "")}
+      ;; TODO Rather than reading nodes we can just call read+string
+      (let [{:keys [row col end-row end-col]} (meta node)]
+        {:line      row
+         :column    col
+         ;; TODO for backwards compatibility with clay
+         :region    [row col end-row end-col]
+         :code      code}))))
 
-      ;; evaluate for value, taking care to capture stderr/stdout and exceptions
-      (let [form (node/sexpr node)
-            {:keys [row col]} (meta node)
-            out (new StringWriter)
-            err (new StringWriter)
-            context {:line   row
-                     :column col
-                     :code   code
-                     :form   form}
-            result (try
-                     ;; TODO: capture `tap` or not?
-                     (let [x (binding [*out* out
-                                       *err* err]
-                               (eval form))]
-                       {:value x})
-                     (catch Throwable ex
-                       (when *on-eval-error*
-                         (*on-eval-error* context ex))
-                       {:exception ex}))
-            out-str (str out)
-            err-str (str err)]
-        (merge context result
-               (when (seq out-str) {:out out-str})
-               (when (seq err-str) {:err err-str}))))))
-
-(defn- babashka? [node]
+(defn- babashka-shebang? [node]
   (-> (node/string node)
       (str/starts-with? "#!/usr/bin/env bb")))
 
-(defn- eval-ast [ast options]
+(defn- ast->notes
   "Given the root Abstract Syntax Tree node,
-  returns a vector of contexts that represent evaluation"
+  returns a vector of notes that represent evaluation"
+  [ast options]
   (let [top-level-nodes (node/children ast)
         ;; TODO: maybe some people want to include the header?
-        babashka (some-> (first top-level-nodes) (babashka?))
-        nodes (if babashka
+        babashka-shebang (some-> (first top-level-nodes) (babashka-shebang?))
+        nodes (if babashka-shebang
                 (rest top-level-nodes)
                 top-level-nodes)]
-    ;; Babashka and Clojure can evaluate files with or without the header present,
-    ;; it is up to the user to specify which evaluator to use in the options.
-    #_(when (and babashka (not= evaluator :babashka))
-        (println "Warning: Babashka header detected while evaluating in Clojure"))
     ;; must be eager to restore current bindings
-    (mapv #(eval-node % options) nodes)))
+    (mapv #(top-level-node->note % options) nodes)))
+
+(def eof
+  (Object.))
+
+(defn- parse-all
+  "Reads all forms from a string or reader."
+  [code]
+  (let [opts (e/normalize-opts {:eof         eof
+                                ;; Starting to test with this
+                                :all         true
+                                :row-key     :line
+                                :col-key     :column
+                                :end-row-key :end-line
+                                :end-col-key :end-column
+                                :uneval (fn [{:keys [next uneval]}]
+                                          (vary-meta next update :uneval
+                                                     conj
+                                                     [uneval (meta uneval)]))})
+        r    (e/source-reader code)]
+    (loop [ret (transient [])]
+      (let [[form source :as v] (e/parse-next+string r opts)]
+        (if (identical? eof form)
+          (persistent! (conj! ret [:eof source (meta form)]))
+          (recur (conj! ret (conj v (meta form)))))))))
+
+(comment
+  ;; Trailing comment can be grabbed from EOF read
+  (parse-all ";; Hello
+[]
+;; buh
+;;hello
+#_(println x)
+;; world
+;; as")
+
+  ;; => [[[] ";; Hello\n[]" {:line 2, :column 1, :end-line 2, :end-column 3}]
+  ;;     [:eof ";; buh\n;;hello\n#_(println x)\n;; world\n;; as" nil]]
+
+  ;; Uneval on eof doesn't work, also not with (reify Object) as eof
+  (parse-all "
+;;hello
+#_(println x)")
+
+  ;; => [[:eof ";;hello\n#_(println x)" nil]]
 
 
-;; TODO: DRY
+  ;; If we append a sentinel value while reading, we can always get
+  ;; uneval at the end too
+  (parse-all ";; Hello
+[1 2 3]
+;; buh
+(+ 1 2)
+;;hello
+#_(println x)
+;; world
+#_[bad]
+;; as
+['sentinel]")
+
+  ;; => [[[1 2 3]
+  ;;      ";; Hello\n[1 2 3]"
+  ;;      {:line 2, :column 1, :end-line 2, :end-column 8}]
+  ;;     [(+ 1 2)
+  ;;      ";; buh\n(+ 1 2)"
+  ;;      {:line 4, :column 1, :end-line 4, :end-column 8}]
+  ;;     [['sentinel]
+  ;;      ";;hello\n#_(println x)\n;; world\n#_[bad]\n;; as\n['sentinel]"
+  ;;      {:line 6,
+  ;;       :column 1,
+  ;;       :end-line 10,
+  ;;       :end-column 12,
+  ;;       :uneval
+  ;;       ([(println x) {:line 6, :column 3, :end-line 6, :end-column 14}]
+  ;;        [[bad] {:line 8, :column 3, :end-line 8, :end-column 8}])}]
+  ;;    [:eof "" nil]]
+
+  ;; TODO need to add :postprocess and wrapping to preserve meta (loc,
+  ;; hopefully uneval) on non-IObj
+  ;; https://github.com/borkdude/edamame/tree/master?tab=readme-ov-file#postprocess
+  (parse-all "
+;;hello
+#_(+ 1 2)
+:a
+#_(println x)
+['sentinel]"))
+
+(defn read-string-all
+  "Parse all forms in a string. The result is passed to `ast->notes`.
+  Suitable for sending a selection of text for visualization.
+  When reading a file, prefer using `read-file` to preserve the
+  current ns bindings."
+  ([code] (read-string-all code {}))
+  ([code options]
+   (validate-options options)
+   (ast->notes (parse-all code) options)))
+
 (defn read-string
-  "Parse and evaluate the first form in a string.
+  "Parse the first form in a string. The result is passed to `ast->notes`.
   Suitable for sending text representing one thing for visualization."
   ([code] (read-string code {}))
   ([code options]
    (validate-options options)
-   ;; preserve current bindings (they will be reset to original)
-   (binding [*ns* *ns*
-             *warn-on-reflection* *warn-on-reflection*
-             *unchecked-math* *unchecked-math*]
-     (-> (parser/parse-string code)
-         (eval-node options)))))
+   ;; TODO but this isn't correct, because we also always want a namsepace?
+   (first (read-string-all code options))))
 
-(defn read-string-all
-  "Parse and evaluate all forms in a string.
-  Suitable for sending a selection of text for visualization.
-  When reading a file, prefer using `read-file` to preserve the current ns bindings."
-  ([code] (read-string-all code {}))
-  ([code options]
-   (validate-options options)
-   ;; preserve current bindings (they will be reset to original)
-   (binding [*ns* *ns*
-             *warn-on-reflection* *warn-on-reflection*
-             *unchecked-math* *unchecked-math*]
-     (-> (parser/parse-string-all code)
-         (eval-ast options)))))
-
-;; TODO: DRY
+;; TODO Add filename to options before passing them on
 (defn read-file
-  "Similar to `clojure.core/load-file`,
-  but returns a representation of the forms and results of evaluation.
+  "Similar to `clojure.core/load-file`, but returns a representation
+  of the forms, which is passed to `ast->notes`.
   Suitable for processing an entire namespace."
   [file options]
   (validate-options options)
-  ;; preserve current bindings (they will be reset to original)
-  (binding [*ns* *ns*
-            *warn-on-reflection* *warn-on-reflection*
-            *unchecked-math* *unchecked-math*]
-    (-> (parser/parse-file-all file)
-        (eval-ast options))))
+  (with-open [r (io/reader file)]
+    (read-string-all r options)))
+
+(defn- eval-note [note options]
+  (if (contains? note :kind)
+    note
+    ;; evaluate for value, capturing *out*, *err* and exceptions
+    ;; TODO doesn't this break namespaced keywords? (sexpr-call
+    ;;      without ns/alias inf)
+    (with-out-err-captured :local captured
+      ;; TODO In the future we might not need clojure read-string
+      ;; Or we have to merge position metadata into form metadata
+      (let [form (if (:code note)
+                   (clojure.core/read-string (:code note))
+                   (:form note))
+            note (assoc note :form form)
+            ;; TODO Probably we need to bind the current file and
+            ;; position
+            result (try
+                     ;; TODO: capture `tap` or not?
+                     (let [x (eval form)]
+                       {:value x})
+                     (catch Throwable ex
+                       (when *on-eval-error*
+                         (*on-eval-error* note ex))
+                       {:exception ex}))]
+        (merge note result (captured))))))
+
+;; TODO still have to print-from-context
+(defn eval-notes
+  ([notes]
+   (eval-notes notes {}))
+  ([notes options]
+   (binding [;; preserve current bindings (they will be reset to
+             ;; original)
+             *ns* *ns*
+             *warn-on-reflection* *warn-on-reflection*
+             *unchecked-math* *unchecked-math*]
+     (with-out-err-captured :global
+       (mapv #(-> (eval-note % options) print-from-context) notes)))))

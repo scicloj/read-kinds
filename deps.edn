@@ -1,13 +1,15 @@
 {:paths ["src"]
- :deps  {org.clojure/clojure            {:mvn/version "1.12.3"}
-         org.scicloj/kindly-advice      {:mvn/version "1-beta14"}
-         rewrite-clj/rewrite-clj        {:mvn/version "1.2.50"}}
+ :deps  {org.clojure/clojure             {:mvn/version "1.12.4"}
+         io.github.scicloj/kindly        {:git/sha "2863a8e08c39b1ec50a2ffde2d0874942a113d4b"}
+         io.github.scicloj/kindly-advice {:git/sha "17f506f169ac09b2c2d90625f1a31246e0b87360"}
+         rewrite-clj/rewrite-clj         {:mvn/version "1.2.50"}
+         borkdude/edamame                {:mvn/version "1.5.37"}}
  :aliases
  {
   ;; Build with `clojure -T:dev build/jar` and `clojure -T:dev build/deploy`
   :dev      {:extra-paths ["notebooks" "test" "dev"]
-             :extra-deps  {org.clojure/tools.build  {:mvn/version "0.9.2"}
-                           slipset/deps-deploy      {:mvn/version "0.2.2"}}}
+             :extra-deps  {org.clojure/tools.build {:mvn/version "0.9.2"}
+                           slipset/deps-deploy     {:mvn/version "0.2.2"}}}
   ;; Run tests with `clojure -M:dev:test -m cognitect.test-runner`
   :test     {:extra-paths ["test"]
              :extra-deps  {io.github.cognitect-labs/test-runner
@@ -18,4 +20,4 @@
   ;; Update dependencies with `clojure -M:outdated --upgrade`
   :outdated {:replace-deps {com.github.liquidz/antq {:mvn/version "2.11.1276"}
                             org.slf4j/slf4j-nop     {:mvn/version "2.0.17"}}
-             :main-opts ["-m" "antq.core"]}}}
+             :main-opts    ["-m" "antq.core"]}}}
