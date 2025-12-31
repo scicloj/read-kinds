@@ -205,4 +205,4 @@
             *warn-on-reflection* *warn-on-reflection*
             *unchecked-math* *unchecked-math*]
     (with-out-err-captured :global
-      (mapv #(-> (eval-note %) print-from-context) notes))))
+      (mapv #(-> (eval-note % options) print-from-context) notes))))
