@@ -101,12 +101,12 @@
       (flush)))
   context)
 
-(defn- eval-node
-  "Given an Abstract Syntax Tree node, returns a context.
-  A context represents a top level form evaluation."
+(defn- top-level-node->note
+  "Given an Abstract Syntax Tree node, returns a note.
+  A note represents a top level form evaluation."
   [node options]
   ;; TODO could just move down to let before eval
-  (let [tag (node/tag node)
+  (let [tag  (node/tag node)
         code (node/string node)]
     (case tag
       (:newline :whitespace) {:code code
@@ -120,35 +120,21 @@
                 :kind  :kind/comment
                 ;; remove leading semicolons or shebangs, and one non-newline space if present.
                 :value (str/replace-first code #"^(;|#!)*[^\S\r\n]?" "")}
-      ;; evaluate for value, capturing *out*, *err* and exceptions
-      ;; TODO doesn't this break namespaced keywords? (sexpr-call
-      ;;      without ns/alias inf)
-      (with-out-err-captured :local captured
-        (let [form (node/sexpr node)
-              {:keys [row col end-row end-col]} (meta node)
-              context {:line   row
-                       :column col
-                       ;; TODO for backwards compatibility with clay
-                       :region [row col end-row end-col]
-                       :code   code
-                       :form   form}
-              result (try
-                       ;; TODO: capture `tap` or not?
-                       (let [x (eval form)]
-                         {:value x})
-                       (catch Throwable ex
-                         (when *on-eval-error*
-                           (*on-eval-error* context ex))
-                         {:exception ex}))]
-          (merge context result (captured)))))))
+      ;; TODO Rather than reading nodes we can just call read+string
+      (let [{:keys [row col end-row end-col]} (meta node)]
+        {:line      row
+         :column    col
+         ;; TODO for backwards compatibility with clay
+         :region    [row col end-row end-col]
+         :code      code}))))
 
 (defn- babashka-shebang? [node]
   (-> (node/string node)
       (str/starts-with? "#!/usr/bin/env bb")))
 
-(defn- eval-ast*
+(defn- ast->notes
   "Given the root Abstract Syntax Tree node,
-  returns a vector of contexts that represent evaluation"
+  returns a vector of notes that represent evaluation"
   [ast options]
   (let [top-level-nodes (node/children ast)
         ;; TODO: maybe some people want to include the header?
@@ -157,19 +143,7 @@
                 (rest top-level-nodes)
                 top-level-nodes)]
     ;; must be eager to restore current bindings
-    (mapv #(-> % (eval-node options) print-from-context) nodes)))
-
-(defn eval-ast
-  "Evaluates an ast as retrieved via the `read-`functions."
-  ([ast] (eval-ast ast {}))
-  ([ast options]
-   (with-out-err-captured :global
-     (binding [;; preserve current bindings (they will be reset to
-               ;; original)
-               *ns* *ns*
-               *warn-on-reflection* *warn-on-reflection*
-               *unchecked-math* *unchecked-math*]
-       (eval-ast* ast options)))))
+    (mapv #(top-level-node->note % options) nodes)))
 
 (defn read-string
   "Parse the first form in a string. The result can be passed to `eval-ast`.
@@ -177,7 +151,7 @@
   ([code] (read-string code {}))
   ([code options]
    (validate-options options)
-   [(parser/parse-string code)]))
+   (ast->notes [(parser/parse-string code)] options)))
 
 (defn read-string-all
   "Parse all forms in a string. The result can be passed to `eval-ast`.
@@ -188,8 +162,9 @@
   ([code options]
    (validate-options options)
    ;; preserve current bindings (they will be reset to original)
-   (parser/parse-string-all code)))
+   (ast->notes (parser/parse-string-all code) options)))
 
+;; TODO Add filename to options before passing them on
 (defn read-file
   "Similar to `clojure.core/load-file`, but returns a representation
   of the forms, which can be passed to `eval-ast`.
@@ -197,4 +172,37 @@
   [file options]
   (validate-options options)
   ;; preserve current bindings (they will be reset to original)
-  (parser/parse-file-all file))
+  (ast->notes (parser/parse-file-all file) options))
+
+(defn- eval-note [note options]
+  ;; evaluate for value, capturing *out*, *err* and exceptions
+  ;; TODO doesn't this break namespaced keywords? (sexpr-call
+  ;;      without ns/alias inf)
+  (with-out-err-captured :local captured
+    ;; TODO In the future we might not need clojure read-string
+    ;; Or we have to merge position metadata into form metadata
+    (let [form (if (:code note)
+                 (clojure.core/read-string (:code note))
+                 (:form note))
+          note (assoc note :form form)
+          ;; TODO Probably we need to bind the current file and
+          ;; position
+          result (try
+                   ;; TODO: capture `tap` or not?
+                   (let [x (eval form)]
+                     {:value x})
+                   (catch Throwable ex
+                     (when *on-eval-error*
+                       (*on-eval-error* note ex))
+                     {:exception ex}))]
+      (merge note result (captured)))))
+
+;; TODO still have to print-from-context
+(defn eval-notes [notes options]
+  (binding [;; preserve current bindings (they will be reset to
+            ;; original)
+            *ns* *ns*
+            *warn-on-reflection* *warn-on-reflection*
+            *unchecked-math* *unchecked-math*]
+    (with-out-err-captured :global
+      (mapv #(-> (eval-note %) print-from-context) notes))))
